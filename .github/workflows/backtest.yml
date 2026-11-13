@@ -1,10 +1,38 @@
 name: Backtest Scalping
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Panjang riwayat (hari)"
+        default: "30"
+      top:
+        description: "Jumlah pair"
+        default: "8"
+permissions:
+  contents: read
+
 jobs:
   bt:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: node scripts/backtest.mjs --days 60
+        with:
+          node-version: 22
+      - name: Cache klines
+        uses: actions/cache@v4
+        with:
+          path: backtest/cache
+          key: bt-cache-${{ github.run_id }}
+          restore-keys: bt-cache-
+      - name: Test offline (tanpa jaringan)
+        run: node scripts/test-backtest.mjs
+      - name: Backtest Binance
+        run: node scripts/backtest.mjs --top ${{ inputs.top }} --days ${{ inputs.days }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Backtest-Scalping
+          path: backtest/out/
+          retention-days: 30
