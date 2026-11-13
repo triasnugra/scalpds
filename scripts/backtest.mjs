@@ -4,12 +4,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { bj, NOT, featScalp } from '../core.mjs';
-import { gradeTrade, mapK } from '../trade-sim.mjs';
+import { bj, NOT, featScalp, scanInput } from '../core.mjs';
+import { gradeTrade } from '../trade-sim.mjs';
 import { summarize, bootCI, groupBy, FILLED } from './backtest-lib.mjs';
 
 const DAY = 864e5;
 const MIN5 = 300000;
+const MIN15 = 900000;
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function retry(fn, n = 3) {
   let e;
@@ -57,11 +59,14 @@ export function parseArgs(a) {
   return o;
 }
 
+// ------------------------------------------------------------------
+// Data
+// ------------------------------------------------------------------
 async function fetchKlines(sym, interval, fromMs, toMs) {
-  const step = interval === '5m' ? 5 * MIN5 : 15 * MIN5;
+  const step = interval === '5m' ? MIN5 : MIN15;
   const out = [];
   let s = fromMs;
-  for (let guard = 0; guard < 300; guard++) {
+  for (let guard = 0; guard < 500; guard++) {
     const a = await retry(() => bj(`klines?symbol=${sym}USDT&interval=${interval}&startTime=${s}&limit=1000`));
     if (!a.length) break;
     for (const x of a) out.push({ t: x[0], o: +x[1], h: +x[2], l: +x[3], c: +x[4], v: +x[5] });
@@ -77,7 +82,8 @@ async function loadKlines(sym, interval, fromMs, toMs, o) {
   if (fs.existsSync(f)) {
     try {
       const c = JSON.parse(fs.readFileSync(f, 'utf8'));
-      if (c.length && c.at(-1).t >= toMs - 2 * (interval === '5m' ? MIN5 : 15 * MIN5)) return c;
+      const step = interval === '5m' ? MIN5 : MIN15;
+      if (c.length && c.at(-1).t >= toMs - 2 * step) return c;
     } catch {}
   }
   const data = await fetchKlines(sym, interval, fromMs, toMs);
@@ -86,6 +92,9 @@ async function loadKlines(sym, interval, fromMs, toMs, o) {
   return data;
 }
 
+// ------------------------------------------------------------------
+// Inti
+// ------------------------------------------------------------------
 export async function runBacktest(o, log = () => {}) {
   fs.mkdirSync(o.cache, { recursive: true });
   const now = Date.now(), cost = 2 * o.fee + o.slip;
@@ -107,7 +116,7 @@ export async function runBacktest(o, log = () => {}) {
     try {
       const k15 = await loadKlines(sym, '15m', fromMs, now, o);
       const k5 = await loadKlines(sym, '5m', fromMs, now, o);
-      if (k15.length < 500 || k5.length < 1000) { meta.skipped.push(`${sym} (data kurang)`); continue; }
+      if (k15.length < 500 || k5.length < 1000) { meta.skipped.push(`${sym} (data kurang: ${k15.length} 15m / ${k5.length} 5m)`); continue; }
       meta.used++;
 
       let busy = 0, nSig = 0;
@@ -116,23 +125,35 @@ export async function runBacktest(o, log = () => {}) {
         if (t < busy) continue;
         if (t + o.holdH * 3600000 > now) break;
 
-        const h15 = k15.slice(0, i + 1);
-        const h5 = k5.filter(b => b.t + MIN5 <= t + 15 * MIN5);
-        if (h5.length < 100) continue;
+        // Bangun input PERSIS seperti live via scanInput().
+        // Ini penting: scanInput() membuang candle 15m/5m yang belum tutup
+        // dan menggantinya dengan candle sintetis berisi HANYA open hari itu.
+        // Tanpa ini, kita akan memakai high/low/close candle 15m yang belum
+        // selesai (look-ahead) atau px dari 5m yang lebih baru dari t.
+        const k15u = k15.slice(Math.max(0, i - 199), i + 1);
+        const k5u = k5.filter(b => b.t <= t + 15 * MIN5);
+        if (k15u.length < 120 || k5u.length < 60) continue;
 
-        let f;
-        try { f = featScalp(h15, h5); } catch { continue; }
+        let inp, f;
+        try {
+          inp = scanInput(k15u, k5u, t);
+          f = featScalp(inp.bars15, inp.bars5, new Date(t));
+        } catch { continue; }
         if (!f.side || f.slp > 1.5) continue;
 
         const due = t + o.holdH * 3600000;
-        const sim5 = k5.filter(b => b.t >= t && b.t <= due);
+
+        // 5m bars selama trade berlangsung. Dibuat langsung dalam format {ot,o,h,l,c,ct}
+        // yang diharapkan gradeTrade — JANGAN pakai mapK (mapK untuk array Binance).
+        const sim5 = k5
+          .filter(b => b.t >= t && b.t <= due)
+          .map(b => ({ ot: b.t, o: b.o, h: b.h, l: b.l, c: b.c, ct: b.t + MIN5 - 1 }));
         if (!sim5.length) continue;
 
-        const g = await gradeTrade({
-          arah: f.side === 1 ? 'LONG' : 'SHORT',
-          entry: f.entry, sl: f.sl, tp1: f.tp1, tp2: f.tp2,
-          t, due,
-        }, { now, h5: async () => sim5.map(mapK) });
+        const g = await gradeTrade(
+          { arah: f.side === 1 ? 'LONG' : 'SHORT', entry: f.entry, sl: f.sl, tp1: f.tp1, tp2: f.tp2, t, due },
+          { now, h5: async () => sim5 }
+        );
         if (!g) continue;
 
         const slp = (Math.abs(f.entry - f.sl) / f.entry) * 100;
@@ -140,7 +161,7 @@ export async function runBacktest(o, log = () => {}) {
         trades.push({
           sym, t, date: iso(t), side: f.side === 1 ? 'LONG' : 'SHORT',
           trig: f.trig, why: f.why.join('|'), entry: f.entry, sl: f.sl, tp1: f.tp1, tp2: f.tp2,
-          slp, hasil: g.hasil, Rg: g.R, R: netR, exitT: g.t, killzone: f.killzone,
+          slp, hasil: g.hasil, Rg: g.R, R: netR, exitT: g.t, killzone: f.killzone || '',
         });
         if (o.dedupe) busy = g.t;
         nSig++;
@@ -154,6 +175,9 @@ export async function runBacktest(o, log = () => {}) {
   return { trades, meta };
 }
 
+// ------------------------------------------------------------------
+// Laporan
+// ------------------------------------------------------------------
 const pct = x => (Number.isFinite(x) ? (x * 100).toFixed(0) + '%' : '-');
 const rr = x => (Number.isFinite(x) ? (x >= 0 ? '+' : '') + x.toFixed(2) : '-');
 const ci = c => (c ? `[${rr(c.lo)}, ${rr(c.hi)}]` : 'n/a');
@@ -169,14 +193,21 @@ function groupTable(title, rows, keyFn, o) {
 }
 
 export function buildReport(trades, o, meta) {
-  if (!trades.length) return { md: '# Backtest DeepScalp\n\nTidak ada sinyal pada periode ini. Coba --days lebih besar atau --top lebih banyak.\n', summary: { n: 0 } };
+  if (!trades.length) {
+    return { md: '# Backtest DeepScalp\n\nTidak ada sinyal pada periode ini. Coba `--days` lebih besar atau `--top` lebih banyak.\n', summary: { n: 0 } };
+  }
   const S = summarize(trades), C = bootCI(trades, { B: o.boot, seed: o.seed });
   let md = `# Backtest DeepScalp\n\n`;
   md += `- Pair dipakai: ${meta.used}/${meta.symbols.length}${meta.skipped.length ? ` (dilewati: ${meta.skipped.join(', ')})` : ''}\n`;
   md += `- Periode sinyal: ${trades[0].date} → ${trades.at(-1).date}\n`;
   md += `- Parameter: hold ${o.holdH} jam, SL maks 1.5%, biaya ${o.fee}%/sisi + slip ${o.slip}% (total ${(2 * o.fee + o.slip).toFixed(2)}%/trade), ${o.dedupe ? 'satu order aktif per koin' : 'semua sinyal dicatat'}\n`;
   md += `- Blok bootstrap: ${C ? C.clusters : 0} hari berbeda (ukuran sampel independen sebenarnya)\n\n`;
-  md += `## Ringkasan\n\n| Metrik | Nilai |\n|---|---|\n| Sinyal | ${S.signals} |\n| Terisi | ${S.filled} (${pct(S.fillRate)}) |\n| TP1 / TP2 / SL / Exp | ${S.tp1} / ${S.tp2} / ${S.sl} / ${S.filled - S.tp1 - S.tp2 - S.sl} |\n| Win rate | ${pct(S.win)} |\n| R/trade | ${rr(S.mean)} |\n| CI 95% R/trade | ${ci(C)} |\n| R/sinyal | ${rr(S.perSignal)} |\n| Total R | ${rr(S.total)} |\n| Profit factor | ${Number.isFinite(S.pf) ? S.pf.toFixed(2) : '-'} |\n| Max DD (R) | ${S.maxDD.toFixed(1)} |\n\n`;
+  md += `## Ringkasan\n\n| Metrik | Nilai |\n|---|---|\n`;
+  md += `| Sinyal | ${S.signals} |\n| Terisi | ${S.filled} (${pct(S.fillRate)}) |\n`;
+  md += `| TP1 / TP2 / SL / Exp | ${S.tp1} / ${S.tp2} / ${S.sl} / ${S.filled - S.tp1 - S.tp2 - S.sl} |\n`;
+  md += `| Win rate | ${pct(S.win)} |\n| R/trade | ${rr(S.mean)} |\n| CI 95% R/trade | ${ci(C)} |\n`;
+  md += `| R/sinyal | ${rr(S.perSignal)} |\n| Total R | ${rr(S.total)} |\n`;
+  md += `| Profit factor | ${Number.isFinite(S.pf) ? S.pf.toFixed(2) : '-'} |\n| Max DD (R) | ${S.maxDD.toFixed(1)} |\n\n`;
   md += `**Kesimpulan:** ${C && C.lo > 0 ? 'CI R/trade di atas 0 — edge positif terbukti secara statistik.' : 'CI R/trade mencakup atau di bawah 0 — edge belum terbukti.'}\n`;
   md += groupTable('Per trigger', trades, x => x.trig, o);
   md += groupTable('Per arah', trades, x => x.side, o);
@@ -189,7 +220,10 @@ export function buildReport(trades, o, meta) {
 export function writeOutputs(trades, rep, o) {
   fs.mkdirSync(o.out, { recursive: true });
   const cols = ['sym', 'date', 'side', 'trig', 'slp', 'entry', 'sl', 'tp1', 'tp2', 'hasil', 'Rg', 'R', 'why', 'killzone'];
-  const csv = [cols.join(','), ...trades.map(x => cols.map(c => (typeof x[c] === 'number' ? +x[c].toPrecision(6) : (x[c] ?? '').toString().replace(/,/g, ';'))).join(','))].join('\n');
+  const csv = [cols.join(','), ...trades.map(x => cols.map(c => {
+    const v = x[c];
+    return typeof v === 'number' ? +v.toPrecision(6) : String(v ?? '').replace(/,/g, ';');
+  }).join(','))].join('\n');
   fs.writeFileSync(path.join(o.out, 'trades.csv'), csv);
   fs.writeFileSync(path.join(o.out, 'report.md'), rep.md);
   fs.writeFileSync(path.join(o.out, 'summary.json'), JSON.stringify(rep.summary, null, 1));
