@@ -1,0 +1,36 @@
+{
+ "dibuat": "2026-11-13T09:35:18.951Z",
+ "chain": {
+  "ok": true,
+  "n": 0,
+  "head": null,
+  "errors": []
+ },
+ "protocol": {
+  "mulai": "2026-11-13T02:14:41.140Z",
+  "engine": "424ae9bd2ecaa551",
+  "agen": "DeepScalp"
+ },
+ "ready": false,
+ "locked": true,
+ "peek": false,
+ "counts": {
+  "tercatat": 0,
+  "selesai": 0,
+  "menunggu": 0,
+  "terisi": 0,
+  "hari_berbeda": 0,
+  "diabaikan_mesin_lain": 0,
+  "dilewati_dedupe": 0
+ },
+ "progress": {
+  "trade_terisi": [
+   0,
+   200
+  ],
+  "hari": [
+   0,
+   30
+  ]
+ }
+}
