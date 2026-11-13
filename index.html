@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeepScalp</title>
+<style>
+body{background:#0a0f17;color:#dbe7f3;font:14px system-ui;padding:16px;max-width:720px;margin:auto}
+h1{font-size:20px}h2{font-size:15px;color:#8aa0b8;margin-top:20px}
+.c{background:#111d2b;border:1px solid #1d334d;border-radius:10px;padding:12px;margin:8px 0}
+.b{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700}
+.L{background:#0c2a1f;color:#34d399}.S{background:#3b1418;color:#f87171}
+.m{color:#8aa0b8;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:6px;border-bottom:1px solid #1d334d;text-align:left}
+.TP1{color:#34d399}.TP2{color:#34d399}.SL{color:#f87171}
+</style>
+</head>
+<body>
+<h1>DeepScalp <span class="b L" style="font-size:10px">SCALPING</span></h1>
+<div id="al"></div>
+<h2>Sinyal</h2>
+<div id="sig"><div class="m">Memuat…</div></div>
+<h2>Forward Test</h2>
+<div id="fw" class="c m">Memuat…</div>
+<h2>Jurnal</h2>
+<div class="c" style="overflow-x:auto"><table id="jt"><tr><td class="m">Memuat…</td></tr></table></div>
+<script type="module">
+import { bj, NOT, featScalp, scanInput } from './core.mjs';
+const $ = s => document.querySelector(s);
+
+fetch('data/forward-report.json').then(r => r.json()).then(a => {
+  const p = a.progress, c = a.counts;
+  $('#fw').innerHTML = `Mulai ${a.protocol.mulai.slice(0,10)} · mesin <code>${a.protocol.engine}</code><br>
+  Trade terisi ${p.trade_terisi[0]}/${p.trade_terisi[1]} · hari ${p.hari[0]}/${p.hari[1]} · menunggu ${c.menunggu}<br>
+  ${a.ready ? 'Evaluasi: <b>'+(a.verdict.pass?'LULUS':'TIDAK LULUS')+'</b>' : 'Angka kinerja disembunyikan sampai syarat terpenuhi.'}`;
+}).catch(() => $('#fw').textContent = 'Belum ada laporan forward test.');
+
+fetch('data/journal.json').then(r => r.json()).then(j => {
+  const J = j.filter(r => r.agen === 'DeepScalp').reverse().slice(0, 30);
+  $('#jt').innerHTML = '<tr><th>Waktu</th><th>Aset</th><th>Arah</th><th>Entry</th><th>SL</th><th>TP</th><th>Hasil</th><th>R</th></tr>' +
+    J.map(r => `<tr><td>${r.waktu}</td><td>${r.aset}</td><td><span class="b ${r.arah === 'LONG' ? 'L' : 'S'}">${r.arah}</span></td>
+    <td>${r.entry}</td><td>${r.sl}</td><td>${r.tp2}</td><td class="${r.hasil}">${r.hasil}</td><td>${r.R ?? ''}</td></tr>`).join('');
+}).catch(() => $('#jt').innerHTML = '<tr><td class="m">Belum ada jurnal.</td></tr>');
+
+async function scan() {
+  try {
+    const t = await bj('ticker/24hr');
+    const top = t.filter(x => x.symbol.endsWith('USDT') && !NOT.test(x.symbol.slice(0, -4)))
+      .sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 20);
+    const res = [];
+    for (let i = 0; i < top.length; i += 5) {
+      await Promise.all(top.slice(i, i + 5).map(async x => {
+        const k15 = (await bj(`klines?symbol=${x.symbol}&interval=15m&limit=300`)).map(a => ({ t: a[0], o: +a[1], h: +a[2], l: +a[3], c: +a[4], v: +a[5] }));
+        const k5 = (await bj(`klines?symbol=${x.symbol}&interval=5m&limit=200`)).map(a => ({ t: a[0], o: +a[1], h: +a[2], l: +a[3], c: +a[4], v: +a[5] }));
+        const f = featScalp(k15.slice(0,-1), k5.slice(0,-1));
+        if (f.side && f.slp <= 1.5) res.push({ s: x.symbol.slice(0,-4), ...f });
+      }));
+    }
+    $('#sig').innerHTML = res.length ? res.map(r => `<div class="c">
+      <b>${r.s}</b> <span class="b ${r.side===1?'L':'S'}">${r.side===1?'LONG':'SHORT'}</span>
+      <span class="m">${r.why.join(' · ')}</span><br>
+      Entry ${r.entry} · SL ${r.sl} (${r.slp.toFixed(2)}%) · TP1 ${r.tp1} · TP2 ${r.tp2}
+    </div>`).join('') : '<div class="m">Tidak ada setup scalp saat ini.</div>';
+  } catch (e) { $('#sig').innerHTML = '<div class="m">Gagal scan: ' + e.message + '</div>'; }
+}
+scan();
+</script>
+</body>
+</html>
