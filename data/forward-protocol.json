@@ -1,0 +1,28 @@
+{
+ "versi": 1,
+ "mulai": "2026-11-13T02:14:41.140Z",
+ "mulai_ms": 1794536081140,
+ "engine": "424ae9bd2ecaa551",
+ "agen": "DeepScalp",
+ "aturan": {
+  "hold_jam": 12,
+  "maks_sl_persen": 1.5,
+  "satu_order_aktif_per_koin": true,
+  "biaya": {
+   "fee_persen_per_sisi": 0.02,
+   "slip_persen": 0.02
+  },
+  "baseline_tp_kelipatan_risiko": 2
+ },
+ "syarat_evaluasi": {
+  "min_trade_terisi": 200,
+  "min_hari_berbeda": 30
+ },
+ "kriteria_lulus": "Setelah KEDUA syarat terpenuhi: batas bawah CI 95% (bootstrap per hari) rata-rata R per trade terisi setelah biaya > 0.",
+ "larangan": [
+  "Mengubah core.mjs atau trade-sim.mjs. Hash berubah dan baris baru tidak dihitung.",
+  "Mengubah syarat evaluasi setelah protokol dimulai.",
+  "Mengedit atau menghapus baris jurnal.",
+  "Menilai hasil sebelum syarat terpenuhi."
+ ]
+}
