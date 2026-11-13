@@ -56,3 +56,14 @@ export function bootCI(rows, { B = 5000, seed = 1, alpha = 0.05, all = false } =
     clusters: C,
   };
 }
+
+// ==== TAMBAHAN: sebelumnya tidak ada, dipakai scripts/backtest.mjs ====
+export function groupBy(rows, fn) {
+  const m = new Map();
+  for (const r of rows) {
+    const k = fn(r);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(r);
+  }
+  return m;
+}
